@@ -1,8 +1,10 @@
+import gym
 import torch
 import random, numpy as np
 from pathlib import Path
 
-from neural import MarioNet
+# from neural import MarioNet
+from my_neural import MarioNet
 from collections import deque
 
 
@@ -54,6 +56,7 @@ class Mario:
 
         # EXPLOIT
         else:
+            state = np.array(state) if isinstance(state, gym.wrappers.frame_stack.LazyFrames) else state
             state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
             state = state.unsqueeze(0)
             action_values = self.net(state, model='online')
@@ -78,11 +81,13 @@ class Mario:
         reward (float),
         done(bool))
         """
-        state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
-        next_state = torch.FloatTensor(next_state).cuda() if self.use_cuda else torch.FloatTensor(next_state)
-        action = torch.LongTensor([action]).cuda() if self.use_cuda else torch.LongTensor([action])
-        reward = torch.DoubleTensor([reward]).cuda() if self.use_cuda else torch.DoubleTensor([reward])
-        done = torch.BoolTensor([done]).cuda() if self.use_cuda else torch.BoolTensor([done])
+        state = np.array(state) if isinstance(state, gym.wrappers.frame_stack.LazyFrames) else state
+        state = torch.FloatTensor(state)
+        next_state = np.array(next_state) if isinstance(next_state, gym.wrappers.frame_stack.LazyFrames) else next_state
+        next_state = torch.FloatTensor(next_state)
+        action = torch.LongTensor([action])
+        reward = torch.DoubleTensor([reward])
+        done = torch.BoolTensor([done])
 
         self.memory.append( (state, next_state, action, reward, done,) )
 
@@ -93,11 +98,15 @@ class Mario:
         """
         batch = random.sample(self.memory, self.batch_size)
         state, next_state, action, reward, done = map(torch.stack, zip(*batch))
+
+        if self.use_cuda:
+            state, next_state, action, reward, done = state.cuda(), next_state.cuda(), action.cuda(), reward.cuda(), done.cuda()
+
         return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
 
 
     def td_estimate(self, state, action):
-        current_Q = self.net(state, model='online')[np.arange(0, self.batch_size), action] # Q_online(s,a)
+        current_Q = self.net(state, model='online')[np.arange(0, self.batch_size), action]  # Q_online(s,a)
         return current_Q
 
 
