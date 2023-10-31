@@ -1,3 +1,4 @@
+import argparse
 import os
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
@@ -6,38 +7,59 @@ from pathlib import Path
 
 import gym
 import gym_super_mario_bros
-from gym.wrappers import FrameStack, GrayScaleObservation, TransformObservation
+from gym.wrappers import FrameStack, TransformObservation
 from nes_py.wrappers import JoypadSpace
 
 from metrics import MetricLogger
 from agent import Mario
-from wrappers import ResizeObservation, SkipFrame
+from wrappers import ResizeObservation, SkipFrame, GrayScaleObservation
 
-# Initialize Super Mario environment
-env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
+# To parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description='Mario - Replay')
 
-# Limit the action-space to
-#   0. walk right
-#   1. jump right
+    # File locations
+    parser.add_argument('--weight_dir', default='checkpoints', dest='weight_dir',
+                        help='Path to directory with trained models. (default = "./checkpoints")')
+    parser.add_argument('--save_dir', default='outputs', dest='save_dir',
+                        help='Path to directory with outputs. (default = "./outputs/")')
+    parser.add_argument('--model', default='', )
+
+    return parser.parse_args()
+
+
+args = parse_args()
+
+if gym.__version__ < '0.26':
+    env = gym_super_mario_bros.make("SuperMarioBros-1-1-v3", new_step_api=True)
+else:
+    env = gym_super_mario_bros.make("SuperMarioBros-1-1-v3", render_mode='rgb_array', apply_api_compatibility=True)
+
 env = JoypadSpace(
     env,
     [['right'],
     ['right', 'A']]
 )
 
+env.reset()
+next_state, reward, done, trunc, info = env.step(action=0)
+print(f"{next_state.shape},\n {reward},\n {done},\n {info}")
+
 # Apply Wrappers to environment
 env = SkipFrame(env, skip=4)
-env = GrayScaleObservation(env, keep_dim=False)
+env = GrayScaleObservation(env)
 env = ResizeObservation(env, shape=84)
 env = TransformObservation(env, f=lambda x: x / 255.)
-env = FrameStack(env, num_stack=4)
-
+if gym.__version__ < '0.26':
+    env = FrameStack(env, num_stack=4, new_step_api=True)
+else:
+    env = FrameStack(env, num_stack=4)
 env.reset()
 
-save_dir = Path('checkpoints') / datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+save_dir = Path(args.save_dir) / datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
 save_dir.mkdir(parents=True)
 
-checkpoint = Path('checkpoints/2023-10-28T17-29-28/mario_net_9.chkpt')  # None
+checkpoint = None  # Path('checkpoints/2023-10-28T17-29-28/mario_net_9.chkpt')  # None
 mario = Mario(state_dim=(4, 84, 84), action_dim=env.action_space.n, save_dir=save_dir, checkpoint=checkpoint)
 
 logger = MetricLogger(save_dir)
@@ -52,28 +74,25 @@ for e in range(episodes):
     # Play the game!
     while True:
 
-        # 3. Show environment (the visual) [WIP]
-        # env.render()
-
-        # 4. Run agent on the state
+        # Run agent on the state
         action = mario.act(state)
 
-        # 5. Agent performs action
-        next_state, reward, done, info = env.step(action)
+        # Agent performs action
+        next_state, reward, done, trunc, info = env.step(action)
 
-        # 6. Remember
+        # Remember
         mario.cache(state, next_state, action, reward, done)
 
-        # 7. Learn
+        # Learn
         q, loss = mario.learn()
 
-        # 8. Logging
+        # Logging
         logger.log_step(reward, loss, q)
 
-        # 9. Update state
+        # Update state
         state = next_state
 
-        # 10. Check if end of game
+        # Check if end of game
         if done or info['flag_get']:
             break
 

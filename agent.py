@@ -3,7 +3,10 @@ import torch
 import random, numpy as np
 from pathlib import Path
 
-# from neural import MarioNet
+from tensordict import TensorDict
+from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
+
+from neural import MarioNet as MarioNet_old
 from my_neural import MarioNet
 from collections import deque
 
@@ -12,8 +15,8 @@ class Mario:
     def __init__(self, state_dim, action_dim, save_dir, checkpoint=None):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.memory = deque(maxlen=100000)
-        self.batch_size = 32
+        self.memory = TensorDictReplayBuffer(storage=LazyMemmapStorage(100000, device=torch.device("cpu")))
+        self.batch_size = 256
 
         self.exploration_rate = 1
         self.exploration_rate_decay = 0.99999975
@@ -34,6 +37,7 @@ class Mario:
         self.net = MarioNet(self.state_dim, self.action_dim).float()
         if self.use_cuda:
             self.net = self.net.to(device='cuda')
+            self.device = 'cuda'
         if checkpoint:
             self.load(checkpoint)
 
@@ -56,10 +60,9 @@ class Mario:
 
         # EXPLOIT
         else:
-            state = np.array(state) if isinstance(state, gym.wrappers.frame_stack.LazyFrames) else state
-            state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
-            state = state.unsqueeze(0)
-            action_values = self.net(state, model='online')
+            state = state[0].__array__() if isinstance(state, tuple) else state.__array__()
+            state = torch.tensor(state, device=self.device).unsqueeze(0)
+            action_values = self.net(state, model="online")
             action_idx = torch.argmax(action_values, axis=1).item()
 
         # decrease exploration_rate
@@ -81,29 +84,37 @@ class Mario:
         reward (float),
         done(bool))
         """
-        state = np.array(state) if isinstance(state, gym.wrappers.frame_stack.LazyFrames) else state
-        state = torch.FloatTensor(state)
-        next_state = np.array(next_state) if isinstance(next_state, gym.wrappers.frame_stack.LazyFrames) else next_state
-        next_state = torch.FloatTensor(next_state)
-        action = torch.LongTensor([action])
-        reward = torch.DoubleTensor([reward])
-        done = torch.BoolTensor([done])
 
-        self.memory.append( (state, next_state, action, reward, done,) )
+        def first_if_tuple(x):
+            return x[0] if isinstance(x, tuple) else x
 
+        state = first_if_tuple(state).__array__()
+        next_state = first_if_tuple(next_state).__array__()
+
+        state = torch.tensor(state)
+        next_state = torch.tensor(next_state)
+        action = torch.tensor([action])
+        reward = torch.tensor([reward])
+        done = torch.tensor([done])
+
+        # self.memory.append((state, next_state, action, reward, done,))
+        self.memory.add(
+            TensorDict({"state": state, "next_state": next_state, "action": action, "reward": reward, "done": done},
+                       batch_size=[]))
 
     def recall(self):
         """
         Retrieve a batch of experiences from memory
         """
-        batch = random.sample(self.memory, self.batch_size)
-        state, next_state, action, reward, done = map(torch.stack, zip(*batch))
-
-        if self.use_cuda:
-            state, next_state, action, reward, done = state.cuda(), next_state.cuda(), action.cuda(), reward.cuda(), done.cuda()
-
+        batch = self.memory.sample(self.batch_size).to(self.device)
+        state, next_state, action, reward, done = (batch.get(key) for key in
+                                                   ("state", "next_state", "action", "reward", "done"))
         return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
 
+        # state, next_state, action, reward, done = map(torch.stack, zip(*batch))
+        # if self.use_cuda:
+        #     state, next_state, action, reward, done = state.cuda(), next_state.cuda(), action.cuda(), reward.cuda(), done.cuda()
+        # return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
 
     def td_estimate(self, state, action):
         current_Q = self.net(state, model='online')[np.arange(0, self.batch_size), action]  # Q_online(s,a)
@@ -176,8 +187,16 @@ class Mario:
 
         ckp = torch.load(load_path, map_location=('cuda' if self.use_cuda else 'cpu'))
         exploration_rate = ckp.get('exploration_rate')
-        state_dict = ckp.get('model')
-
-        print(f"Loading model at {load_path} with exploration rate {exploration_rate}")
-        self.net.load_state_dict(state_dict)
         self.exploration_rate = exploration_rate
+
+        state_dict = ckp.get('model')
+        print(f"Loading model at {load_path} with exploration rate {exploration_rate}")
+        try:
+            self.net.load_state_dict(state_dict)
+        except RuntimeError:
+            # old model
+            print('Error loading state_dict, likely a size mismatch when loading old model')
+            self.net = MarioNet_old(self.state_dim, self.action_dim).float()
+            self.net.to(self.device)
+            self.net.load_state_dict(state_dict)
+
